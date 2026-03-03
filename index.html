@@ -7,13 +7,9 @@
   <style>
     :root{
       --bg:#0b1020;
-      --card:#121a33;
-      --card2:#0f1630;
       --text:#eef1ff;
       --muted:#b9c2ee;
       --line:rgba(255,255,255,.10);
-      --accent:#6ea8ff;
-      --danger:#ff6e6e;
       --shadow: 0 10px 25px rgba(0,0,0,.35);
       --radius: 16px;
     }
@@ -251,6 +247,7 @@
       color: var(--muted);
       font-size: 13px;
       margin: 0;
+      line-height: 1.35;
     }
 
     .list{
@@ -341,6 +338,31 @@
       flex: 0 0 auto;
     }
     .mono{ font-variant-numeric: tabular-nums; }
+
+    .table{
+      width:100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      overflow:hidden;
+      border-radius: 14px;
+      border: 1px solid rgba(255,255,255,.08);
+      background: rgba(255,255,255,.03);
+    }
+    .table th, .table td{
+      padding: 10px 10px;
+      border-bottom: 1px solid rgba(255,255,255,.06);
+      font-size: 13px;
+      text-align:left;
+      vertical-align: top;
+    }
+    .table th{
+      color: var(--muted);
+      font-weight: 800;
+      font-size: 12px;
+      letter-spacing:.2px;
+      background: rgba(255,255,255,.02);
+    }
+    .table tr:last-child td{ border-bottom: 0; }
   </style>
 </head>
 
@@ -349,7 +371,7 @@
     <header>
       <div class="title">
         <h1>Messreihen</h1>
-        <p>Messen, speichern und vergleichen – direkt im Browser.</p>
+        <p>Messen, speichern und auswerten – direkt im Browser.</p>
       </div>
 
       <div class="pill" id="statsPill">0 Messreihen</div>
@@ -365,7 +387,7 @@
       <button class="action" id="openAnalyze" type="button">
         <div class="kicker">2</div>
         <div class="name">Auswerten</div>
-        <div class="desc">Graphen anzeigen und mehrere Messreihen vergleichen.</div>
+        <div class="desc">Messreihen vergleichen und Effektivität (Ef) darstellen.</div>
       </button>
 
       <button class="action" id="openData" type="button">
@@ -388,7 +410,6 @@
       </div>
 
       <div class="modal-body" id="modalBody"></div>
-
       <div class="modal-foot" id="modalFoot"></div>
     </div>
   </div>
@@ -443,10 +464,12 @@
           <div class="field">
             <label for="mode">Darstellung</label>
             <select id="mode">
-              <option value="selected">Ausgewählte Messreihen (Vergleich)</option>
-              <option value="windingAvg">Mittelwerte nach Windungszahl</option>
-              <option value="dirAvg">Mittelwerte nach Richtung</option>
-              <option value="windingDirAvg">Mittelwerte nach Windungszahl + Richtung</option>
+              <option value="selected">Zeit: Ausgewählte Messreihen (Vergleich)</option>
+              <option value="windingAvg">Zeit: Mittelwerte nach Windungszahl</option>
+              <option value="dirAvg">Zeit: Mittelwerte nach Richtung</option>
+              <option value="windingDirAvg">Zeit: Mittelwerte nach Windungszahl + Richtung</option>
+              <option value="ef_segment_by_winding">Ef: pro Runde (Rückwärts/Vorwärts) nach Windungszahl</option>
+              <option value="ef_total_by_winding">Ef: gesamt (Rückwärts/Vorwärts) nach Windungszahl</option>
             </select>
           </div>
         </div>
@@ -457,11 +480,17 @@
         </div>
 
         <div class="checkboxes" id="seriesChecks"></div>
+
+        <p class="subtime" style="margin-top:10px;">
+          Effektivität (Ef) ist definiert als Verhältnis der Durchlaufzeit rückwärts zur Durchlaufzeit vorwärts:
+          <span class="mono">Ef = tr / tv</span>.
+          Für Ef-Auswertungen werden pro Windungszahl jeweils Vorwärts- und Rückwärts-Messreihen benötigt.
+        </p>
       </div>
 
       <div class="card">
         <div class="row" style="justify-content:space-between; align-items:flex-end;">
-          <div class="pill">X: Runde (1–5) · Y: Zeit (s)</div>
+          <div class="pill" id="axisHint">X · Y</div>
           <button class="btn" id="redrawBtn" type="button">Neu zeichnen</button>
         </div>
 
@@ -470,6 +499,7 @@
         </div>
 
         <p class="subtime" id="chartHelp" style="margin-top:10px;"></p>
+        <div id="detailArea"></div>
       </div>
     </div>
   </template>
@@ -537,11 +567,8 @@
 
     function setModalFoot(html){
       modalFoot.innerHTML = html || "";
-      if(html){
-        modalFoot.classList.add("open");
-      }else{
-        modalFoot.classList.remove("open");
-      }
+      if(html) modalFoot.classList.add("open");
+      else modalFoot.classList.remove("open");
     }
 
     function openModal(title, templateId, initFn){
@@ -615,7 +642,6 @@
       }
 
       function updateName(){ nameEl.value = baseName(); }
-
       function fmtMs(msInt){ return (msInt / 1000).toFixed(3); }
 
       function renderLaps(){
@@ -745,6 +771,8 @@
       const redrawBtn = document.getElementById("redrawBtn");
       const canvas = document.getElementById("chart");
       const helpEl = document.getElementById("chartHelp");
+      const axisHintEl = document.getElementById("axisHint");
+      const detailArea = document.getElementById("detailArea");
       const ctx = canvas.getContext("2d");
 
       const all = loadSeries().sort((a,b) => b.createdAt - a.createdAt);
@@ -788,66 +816,485 @@
         });
       }
 
+      /** @returns {Series[]} */
       function getSelectedSeries(){
         return all.filter(s => selectedIds.has(s.id));
       }
 
-      /** @param {Series[]} series */
-      function makeLines(series){
-        const mode = modeEl.value;
-        if(mode === "selected"){
-          return series.map((s, idx) => ({ label: s.name, lapsMs: s.lapsMs, color: PALETTE[idx % PALETTE.length] }));
-        }
-
-        const groups = new Map();
-        function keyFor(s){
-          if(mode === "windingAvg") return `W${s.windings}`;
-          if(mode === "dirAvg") return s.direction;
-          return `W${s.windings} · ${s.direction}`;
-        }
-
-        for(const s of series){
-          const key = keyFor(s);
-          if(!groups.has(key)) groups.set(key, { label:key, sum:[0,0,0,0,0], n:0 });
-          const g = groups.get(key);
-          for(let i=0;i<5;i++) g.sum[i] += s.lapsMs[i];
-          g.n += 1;
-        }
-
-        const keys = Array.from(groups.keys()).sort((a,b)=>a.localeCompare(b,"de"));
-        return keys.map((k, idx) => {
-          const g = groups.get(k);
-          const avg = g.sum.map(v => Math.round(v / g.n));
-          return { label: `${g.label} (n=${g.n})`, lapsMs: avg, color: PALETTE[idx % PALETTE.length] };
-        });
+      /** @param {number[]} arr */
+      function avgInt(arr){
+        if(arr.length === 0) return null;
+        let sum = 0;
+        for(const v of arr) sum += v;
+        return Math.round(sum / arr.length);
       }
 
-      function clear(){ ctx.clearRect(0,0,canvas.width,canvas.height); }
+      /**
+       * Effektivität (Ef) berechnen:
+       * - pro Windungszahl: Durchschnitt Vorwärts und Rückwärts je Runde (Segment)
+       * - Ef_i = avg(tr_i) / avg(tv_i)
+       * - Ef_total = avg(sum(tr)) / avg(sum(tv))  (jeweils über Messreihen gemittelt)
+       *
+       * @param {Series[]} series
+       * @returns {{
+       *   byWinding: Map<number, { nV:number, nR:number, efBySeg:number[], efTotal:number|null }>,
+       *   windingsSorted: number[]
+       * }}
+       */
+      function computeEf(series){
+        /** @type {Map<number, {v: Series[], r: Series[]}>} */
+        const buckets = new Map();
 
+        for(const s of series){
+          if(!buckets.has(s.windings)) buckets.set(s.windings, {v:[], r:[]});
+          const b = buckets.get(s.windings);
+          if(s.direction === "Vorwärts") b.v.push(s);
+          else b.r.push(s);
+        }
+
+        const windingsSorted = Array.from(buckets.keys()).sort((a,b)=>a-b);
+
+        /** @type {Map<number, { nV:number, nR:number, efBySeg:number[], efTotal:number|null }>} */
+        const byWinding = new Map();
+
+        for(const w of windingsSorted){
+          const b = buckets.get(w);
+          const nV = b.v.length;
+          const nR = b.r.length;
+
+          // Durchschnittliche Runde i für Vorwärts / Rückwärts
+          /** @type {(number|null)[]} */
+          const vAvg = [null,null,null,null,null];
+          /** @type {(number|null)[]} */
+          const rAvg = [null,null,null,null,null];
+
+          for(let i=0;i<5;i++){
+            const vI = b.v.map(s => s.lapsMs[i]);
+            const rI = b.r.map(s => s.lapsMs[i]);
+            vAvg[i] = avgInt(vI);
+            rAvg[i] = avgInt(rI);
+          }
+
+          // Ef je Segment (nur wenn beide vorhanden)
+          const efBySeg = [];
+          for(let i=0;i<5;i++){
+            const v = vAvg[i], r = rAvg[i];
+            if(v && r && v > 0) efBySeg.push(r / v);
+            else efBySeg.push(NaN);
+          }
+
+          // Ef gesamt über Summen (nur wenn beide vorhanden)
+          const vTot = avgInt(b.v.map(s => s.lapsMs.reduce((a,b)=>a+b,0)));
+          const rTot = avgInt(b.r.map(s => s.lapsMs.reduce((a,b)=>a+b,0)));
+          const efTotal = (vTot && rTot && vTot > 0) ? (rTot / vTot) : null;
+
+          byWinding.set(w, { nV, nR, efBySeg, efTotal });
+        }
+
+        return { byWinding, windingsSorted };
+      }
+
+      /**
+       * @param {Series[]} series
+       * @returns {{
+       *  chartType:"line"|"bar",
+       *  xLabels:string[],
+       *  yLabel:string,
+       *  lines:{label:string, values:number[], color:string}[],
+       *  detailHtml:string,
+       *  helpText:string
+       * }}
+       */
+      function buildDataset(series){
+        const mode = modeEl.value;
+
+        // Zeit-Modi (bestehendes Verhalten, als Sekunden)
+        if(mode === "selected" || mode === "windingAvg" || mode === "dirAvg" || mode === "windingDirAvg"){
+          const yLabel = "Zeit (s)";
+          const xLabels = ["1","2","3","4","5"];
+
+          if(mode === "selected"){
+            const lines = series.map((s, idx) => ({
+              label: s.name,
+              values: s.lapsMs.map(ms => ms/1000),
+              color: PALETTE[idx % PALETTE.length]
+            }));
+            return {
+              chartType: "line",
+              xLabels,
+              yLabel,
+              lines,
+              detailHtml: "",
+              helpText: `Auswahl: ${series.length}`
+            };
+          }
+
+          // Gruppierungen als Mittelwert über ausgewählte Reihen
+          /** @type {Map<string, {label:string, sum:number[], n:number}>} */
+          const groups = new Map();
+
+          function keyFor(s){
+            if(mode === "windingAvg") return `W${s.windings}`;
+            if(mode === "dirAvg") return s.direction;
+            return `W${s.windings} · ${s.direction}`;
+          }
+
+          for(const s of series){
+            const key = keyFor(s);
+            if(!groups.has(key)) groups.set(key, { label:key, sum:[0,0,0,0,0], n:0 });
+            const g = groups.get(key);
+            for(let i=0;i<5;i++) g.sum[i] += s.lapsMs[i];
+            g.n += 1;
+          }
+
+          const keys = Array.from(groups.keys()).sort((a,b)=>a.localeCompare(b,"de"));
+          const lines = keys.map((k, idx) => {
+            const g = groups.get(k);
+            const avgMs = g.sum.map(v => v / g.n);
+            return { label: `${g.label} (n=${g.n})`, values: avgMs.map(ms => ms/1000), color: PALETTE[idx % PALETTE.length] };
+          });
+
+          return {
+            chartType: "line",
+            xLabels,
+            yLabel,
+            lines,
+            detailHtml: "",
+            helpText: `Gruppen: ${lines.length}`
+          };
+        }
+
+        // Ef-Modi
+        const ef = computeEf(series);
+
+        if(mode === "ef_segment_by_winding"){
+          const xLabels = ["1","2","3","4","5"];
+          const yLabel = "Ef = tr/tv";
+
+          const lines = [];
+          let colorIdx = 0;
+
+          for(const w of ef.windingsSorted){
+            const item = ef.byWinding.get(w);
+            // nur anzeigen, wenn es mindestens 1 Vorwärts und 1 Rückwärts gibt
+            if(item.nV >= 1 && item.nR >= 1){
+              lines.push({
+                label: `W${w} (V:${item.nV} / R:${item.nR})`,
+                values: item.efBySeg.map(v => Number.isFinite(v) ? v : NaN),
+                color: PALETTE[colorIdx++ % PALETTE.length]
+              });
+            }
+          }
+
+          const detailHtml = renderEfTablePerSegment(ef);
+          const helpText = lines.length
+            ? "Ef pro Runde (Segment 1–5)."
+            : "Für Ef werden pro Windungszahl mindestens eine Vorwärts- und eine Rückwärts-Messreihe benötigt.";
+
+          return { chartType:"line", xLabels, yLabel, lines, detailHtml, helpText };
+        }
+
+        // ef_total_by_winding
+        {
+          const xLabels = ef.windingsSorted.map(w => `W${w}`);
+          const yLabel = "Ef = tr/tv";
+
+          const values = [];
+          const missing = [];
+          for(const w of ef.windingsSorted){
+            const item = ef.byWinding.get(w);
+            if(item.nV >= 1 && item.nR >= 1 && item.efTotal !== null){
+              values.push(item.efTotal);
+            }else{
+              values.push(NaN);
+              missing.push(`W${w}`);
+            }
+          }
+
+          const lines = [{
+            label: "Ef gesamt",
+            values,
+            color: PALETTE[0]
+          }];
+
+          const detailHtml = renderEfTableTotal(ef);
+          const helpText = missing.length
+            ? `Nicht verfügbar für: ${missing.join(", ")} (Vorwärts und Rückwärts erforderlich).`
+            : "Ef gesamt je Windungszahl.";
+
+          return { chartType:"bar", xLabels, yLabel, lines, detailHtml, helpText };
+        }
+      }
+
+      function renderEfTablePerSegment(ef){
+        const rows = [];
+        for(const w of ef.windingsSorted){
+          const item = ef.byWinding.get(w);
+          const cells = [];
+          for(let i=0;i<5;i++){
+            const v = item.efBySeg[i];
+            cells.push(Number.isFinite(v) ? v.toFixed(3) : "—");
+          }
+          rows.push(`
+            <tr>
+              <td class="mono">W${w}</td>
+              <td class="mono">${item.nV}</td>
+              <td class="mono">${item.nR}</td>
+              <td class="mono">${cells.join(" · ")}</td>
+            </tr>
+          `);
+        }
+
+        return `
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Windungszahl</th>
+                <th>Vorwärts</th>
+                <th>Rückwärts</th>
+                <th>Ef pro Runde (1–5)</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.join("")}
+            </tbody>
+          </table>
+        `;
+      }
+
+      function renderEfTableTotal(ef){
+        const rows = [];
+        for(const w of ef.windingsSorted){
+          const item = ef.byWinding.get(w);
+          const val = (item.nV >= 1 && item.nR >= 1 && item.efTotal !== null) ? item.efTotal.toFixed(3) : "—";
+          rows.push(`
+            <tr>
+              <td class="mono">W${w}</td>
+              <td class="mono">${item.nV}</td>
+              <td class="mono">${item.nR}</td>
+              <td class="mono">${val}</td>
+            </tr>
+          `);
+        }
+
+        return `
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Windungszahl</th>
+                <th>Vorwärts</th>
+                <th>Rückwärts</th>
+                <th>Ef gesamt</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.join("")}
+            </tbody>
+          </table>
+        `;
+      }
+
+      function clear(){
+        ctx.clearRect(0,0,canvas.width,canvas.height);
+      }
+
+      /**
+       * Zeichnen:
+       * - line: mehrere Linien
+       * - bar: Balken (eine oder mehrere "lines" werden als Gruppen-Bars gezeichnet)
+       */
       function draw(){
+        detailArea.innerHTML = "";
+
         const selected = getSelectedSeries();
         if(all.length === 0){
-          clear(); helpEl.textContent = "Keine Daten."; return;
+          clear();
+          axisHintEl.textContent = "—";
+          helpEl.textContent = "Keine Daten.";
+          return;
         }
         if(selected.length === 0){
-          clear(); helpEl.textContent = "Keine Auswahl."; return;
+          clear();
+          axisHintEl.textContent = "—";
+          helpEl.textContent = "Keine Auswahl.";
+          return;
         }
 
-        const lines = makeLines(selected);
+        const ds = buildDataset(selected);
+        axisHintEl.textContent = `X: ${ds.xLabels.length === 5 ? "Runde (1–5)" : "Windungszahl"} · Y: ${ds.yLabel}`;
+
+        if(ds.detailHtml) detailArea.innerHTML = ds.detailHtml;
+
+        // Wenn keine Linien (z.B. Ef ohne Paare)
+        const hasAny = ds.lines.some(ln => ln.values.some(v => Number.isFinite(v)));
+        if(!hasAny){
+          clear();
+          helpEl.textContent = ds.helpText;
+          return;
+        }
+
+        if(ds.chartType === "line"){
+          drawLineChart(ds);
+        }else{
+          drawBarChart(ds);
+        }
+
+        helpEl.textContent = ds.helpText;
+      }
+
+      function drawLineChart(ds){
+        clear();
+
         const pad = {l:60, r:18, t:18, b:46};
         const w = canvas.width, h = canvas.height;
         const plotW = w - pad.l - pad.r;
         const plotH = h - pad.t - pad.b;
+        const n = ds.xLabels.length;
 
-        let maxY = 1;
-        for(const ln of lines) for(const ms of ln.lapsMs) maxY = Math.max(maxY, ms);
-        maxY = Math.ceil(maxY * 1.08);
+        // min/max Y (ohne NaN)
+        let minY = Infinity, maxY = -Infinity;
+        for(const ln of ds.lines){
+          for(const v of ln.values){
+            if(Number.isFinite(v)){
+              minY = Math.min(minY, v);
+              maxY = Math.max(maxY, v);
+            }
+          }
+        }
+        if(!Number.isFinite(minY) || !Number.isFinite(maxY)){
+          minY = 0; maxY = 1;
+        }
 
-        const xFor = (i) => pad.l + (plotW * (i / 4));
-        const yFor = (ms) => pad.t + plotH * (1 - (ms / maxY));
+        // Für Zeiten: immer bei 0 starten
+        if(ds.yLabel.startsWith("Zeit")){
+          minY = 0;
+        }else{
+          // Für Ef: etwas Luft
+          const span = Math.max(1e-9, (maxY - minY));
+          minY = Math.max(0, minY - span * 0.10);
+          maxY = maxY + span * 0.10;
+        }
 
+        // Grid: 5 horizontale Linien
+        const xFor = (i) => {
+          if(n === 1) return pad.l + plotW/2;
+          return pad.l + (plotW * (i / (n-1)));
+        };
+        const yFor = (val) => pad.t + plotH * (1 - ((val - minY) / (maxY - minY || 1)));
+
+        // Grid
+        ctx.save();
+        ctx.strokeStyle = "rgba(255,255,255,.08)";
+        ctx.lineWidth = 1;
+
+        for(let g=0; g<=4; g++){
+          const y = pad.t + plotH * (g/4);
+          ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
+        }
+        for(let i=0; i<n; i++){
+          const x = xFor(i);
+          ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, h - pad.b); ctx.stroke();
+        }
+        ctx.restore();
+
+        // Labels X
+        ctx.save();
+        ctx.fillStyle = "rgba(232,236,255,.92)";
+        ctx.font = "12px ui-sans-serif, system-ui, -apple-system";
+        ctx.textAlign = "center";
+        for(let i=0;i<n;i++){
+          ctx.fillText(ds.xLabels[i], xFor(i), h - 20);
+        }
+        ctx.restore();
+
+        // Labels Y
+        ctx.save();
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(185,194,238,.95)";
+        ctx.font = "12px ui-sans-serif, system-ui, -apple-system";
+        for(let g=0; g<=4; g++){
+          const val = maxY - (maxY - minY) * (g/4);
+          const y = pad.t + plotH * (g/4);
+          const txt = ds.yLabel.startsWith("Zeit") ? val.toFixed(3) : val.toFixed(3);
+          ctx.fillText(txt, pad.l - 10, y + 4);
+        }
+        ctx.restore();
+
+        // Linien
+        for(const ln of ds.lines){
+          ctx.save();
+          ctx.strokeStyle = ln.color;
+          ctx.fillStyle = ln.color;
+          ctx.lineWidth = 2;
+
+          let started = false;
+          ctx.beginPath();
+          for(let i=0;i<n;i++){
+            const v = ln.values[i];
+            if(!Number.isFinite(v)) continue;
+            const x = xFor(i), y = yFor(v);
+            if(!started){ ctx.moveTo(x,y); started = true; }
+            else ctx.lineTo(x,y);
+          }
+          if(started) ctx.stroke();
+
+          // Punkte
+          for(let i=0;i<n;i++){
+            const v = ln.values[i];
+            if(!Number.isFinite(v)) continue;
+            const x = xFor(i), y = yFor(v);
+            ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
+          }
+          ctx.restore();
+        }
+
+        // Legende (oben links)
+        ctx.save();
+        ctx.font = "12px ui-sans-serif, system-ui, -apple-system";
+        ctx.textAlign = "left";
+        let lx = pad.l + 6, ly = pad.t + 6;
+        for(const ln of ds.lines.slice(0, 8)){
+          ctx.fillStyle = ln.color;
+          ctx.fillRect(lx, ly+3, 10, 10);
+          ctx.fillStyle = "rgba(232,236,255,.92)";
+          ctx.fillText(ln.label, lx + 16, ly + 12);
+          ly += 18;
+        }
+        if(ds.lines.length > 8){
+          ctx.fillStyle = "rgba(185,194,238,.9)";
+          ctx.fillText(`+${ds.lines.length-8} weitere`, lx + 16, ly + 12);
+        }
+        ctx.restore();
+      }
+
+      function drawBarChart(ds){
         clear();
 
+        const pad = {l:60, r:18, t:18, b:46};
+        const w = canvas.width, h = canvas.height;
+        const plotW = w - pad.l - pad.r;
+        const plotH = h - pad.t - pad.b;
+        const n = ds.xLabels.length;
+        const m = ds.lines.length;
+
+        // min/max Y (ohne NaN)
+        let minY = 0;
+        let maxY = 1;
+        for(const ln of ds.lines){
+          for(const v of ln.values){
+            if(Number.isFinite(v)) maxY = Math.max(maxY, v);
+          }
+        }
+        maxY = maxY * 1.10;
+
+        const xBand = plotW / Math.max(1, n);
+        const groupPad = Math.min(18, xBand * 0.25);
+        const barAreaW = xBand - groupPad;
+        const barW = barAreaW / Math.max(1, m);
+
+        const yFor = (val) => pad.t + plotH * (1 - ((val - minY) / (maxY - minY || 1)));
+
+        // Grid
         ctx.save();
         ctx.strokeStyle = "rgba(255,255,255,.08)";
         ctx.lineWidth = 1;
@@ -855,63 +1302,64 @@
           const y = pad.t + plotH * (g/4);
           ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
         }
-        for(let i=0; i<5; i++){
-          const x = xFor(i);
-          ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, h - pad.b); ctx.stroke();
+        ctx.restore();
+
+        // Y labels
+        ctx.save();
+        ctx.textAlign = "right";
+        ctx.fillStyle = "rgba(185,194,238,.95)";
+        ctx.font = "12px ui-sans-serif, system-ui, -apple-system";
+        for(let g=0; g<=4; g++){
+          const val = maxY - (maxY - minY) * (g/4);
+          const y = pad.t + plotH * (g/4);
+          ctx.fillText(val.toFixed(3), pad.l - 10, y + 4);
         }
         ctx.restore();
 
+        // X labels
         ctx.save();
         ctx.fillStyle = "rgba(232,236,255,.92)";
         ctx.font = "12px ui-sans-serif, system-ui, -apple-system";
         ctx.textAlign = "center";
-        for(let i=0;i<5;i++) ctx.fillText(String(i+1), xFor(i), h - 20);
-
-        ctx.textAlign = "right";
-        ctx.fillStyle = "rgba(185,194,238,.95)";
-        for(let g=0; g<=4; g++){
-          const ms = Math.round(maxY * (1 - g/4));
-          const y = pad.t + plotH * (g/4);
-          ctx.fillText((ms/1000).toFixed(3), pad.l - 10, y + 4);
+        for(let i=0;i<n;i++){
+          const xCenter = pad.l + xBand*i + xBand/2;
+          ctx.fillText(ds.xLabels[i], xCenter, h - 20);
         }
         ctx.restore();
 
-        for(const ln of lines){
-          ctx.save();
-          ctx.strokeStyle = ln.color;
-          ctx.fillStyle = ln.color;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ln.lapsMs.forEach((ms, i) => {
-            const x = xFor(i), y = yFor(ms);
-            if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
-          });
-          ctx.stroke();
-          ln.lapsMs.forEach((ms, i) => {
-            const x = xFor(i), y = yFor(ms);
-            ctx.beginPath(); ctx.arc(x, y, 4, 0, Math.PI*2); ctx.fill();
-          });
-          ctx.restore();
+        // Bars
+        for(let i=0;i<n;i++){
+          const x0 = pad.l + xBand*i + groupPad/2;
+          for(let j=0;j<m;j++){
+            const ln = ds.lines[j];
+            const v = ln.values[i];
+            if(!Number.isFinite(v)) continue;
+            const barX = x0 + j*barW;
+            const yTop = yFor(v);
+            const yBase = yFor(0);
+            const barH = Math.max(0, yBase - yTop);
+
+            ctx.save();
+            ctx.fillStyle = ln.color;
+            ctx.globalAlpha = 0.85;
+            ctx.fillRect(barX, yTop, Math.max(2, barW-2), barH);
+            ctx.restore();
+          }
         }
 
+        // Legende
         ctx.save();
         ctx.font = "12px ui-sans-serif, system-ui, -apple-system";
         ctx.textAlign = "left";
         let lx = pad.l + 6, ly = pad.t + 6;
-        for(const ln of lines.slice(0, 8)){
+        for(const ln of ds.lines.slice(0, 8)){
           ctx.fillStyle = ln.color;
           ctx.fillRect(lx, ly+3, 10, 10);
           ctx.fillStyle = "rgba(232,236,255,.92)";
           ctx.fillText(ln.label, lx + 16, ly + 12);
           ly += 18;
         }
-        if(lines.length > 8){
-          ctx.fillStyle = "rgba(185,194,238,.9)";
-          ctx.fillText(`+${lines.length-8} weitere`, lx + 16, ly + 12);
-        }
         ctx.restore();
-
-        helpEl.textContent = `${modeEl.options[modeEl.selectedIndex].textContent} · Auswahl: ${selected.length}`;
       }
 
       buildChecks();
